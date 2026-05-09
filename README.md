@@ -1,7 +1,47 @@
-# Tauri + Vue + TypeScript
+# anitagger
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+anitagger は、Annict のデータを活用してアニメ動画ファイルを自動的にリネームするデスクトップアプリケーションです。
 
-## Recommended IDE Setup
+![anitagger UI](public/tauri.svg) <!-- 必要に応じて実際のスクリーンショットに変更してください -->
 
-- [VS Code](https://code.visualstudio.com/) + [Vue - Official](https://marketplace.visualstudio.com/items?itemName=Vue.volar) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+## 特徴
+
+- **Annict API 連携**: アニメ作品タイトルから正確なエピソード情報を取得します。
+- **高度なマッチング**: ファイル名から話数を抽出し、タイトルと組み合わせた最適なファイル名（例: `01 - 始まりの物語.mp4`）を提案します。
+- **直感的な UI**: Vue 3 と DaisyUI を使用したモダンで使いやすいライトテーマのインターフェース。
+- **一括・個別リネーム**: フォルダ全体の処理はもちろん、単一ファイルのリネームにも対応。実行前にプレビューで変更内容を確認できます。
+- **セキュアな設計**: API トークンはビルド時に安全に注入されます。
+
+## 使い方
+
+1.  **作品検索**: 左側のサイドバーからアニメタイトルを検索し、対象の作品を選択します。
+2.  **ファイル選択**: 上部のボタンからリネームしたいファイルまたはフォルダを選択します。
+3.  **プレビュー**: 自動的に抽出された新しいファイル名を確認します。必要に応じてチェックボックスで対象を絞り込めます。
+4.  **実行**: 右下の「実行」ボタンを押すと、実際にファイル名が変更されます。
+
+## 開発・ビルド
+
+このプロジェクトは Tauri と Bun を使用して構築されています。
+
+### 依存関係のインストール
+
+```bash
+bun install
+```
+
+### 開発モードの起動
+
+```bash
+bun tauri dev
+```
+
+### ビルド
+
+```bash
+bun tauri build
+```
+※ ビルドには Rust の環境構築が必要です。また、`ANNICT_TOKEN` 環境変数を設定する必要があります。
+
+## ライセンス
+
+MIT License
