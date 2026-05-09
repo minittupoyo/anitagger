@@ -35,6 +35,7 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANNICT_TOKEN: ${{ secrets.ANNICT_TOKEN }}
         with:
           tagName: app-v__VERSION__ # the action automatically replaces this with the app version
           releaseName: "anitagger v__VERSION__"

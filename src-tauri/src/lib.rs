@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 
-const DEFAULT_TOKEN: &str = "CiMm8WUfyI0OuH2USrMd9FBz3SGHVezpmj_dt43dGt8";
+const DEFAULT_TOKEN: &str = env!("ANNICT_TOKEN");
 const BASE_URL: &str = "https://api.annict.com/v1";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
