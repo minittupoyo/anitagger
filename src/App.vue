@@ -6,6 +6,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 interface AnnictWork {
   id: number;
   title: string;
+  media: string | null;
   media_text: string | null;
   season_name_text: string | null;
 }
@@ -24,6 +25,7 @@ interface RenameTask {
   old_name: string;
   new_name: string;
   selected?: boolean;
+  isEditing?: boolean;
 }
 
 const targetPath = ref("");
@@ -90,11 +92,13 @@ async function selectWork(work: AnnictWork) {
 }
 
 async function generateTasks() {
-  if (!targetPath.value || !episodes.value.length) return;
+  if (!targetPath.value || !selectedWork.value) return;
   try {
     const rawTasks: RenameTask[] = await invoke("get_rename_tasks", {
       path: targetPath.value,
       episodes: episodes.value,
+      workTitle: selectedWork.value.title,
+      media: selectedWork.value.media,
     });
     tasks.value = rawTasks.map(t => ({ ...t, selected: true }));
     if (tasks.value.length === 0) {
@@ -131,6 +135,76 @@ async function executeRename() {
 const toggleAllTasks = (val: boolean) => {
   tasks.value.forEach(t => t.selected = val);
 };
+
+// ドラッグ＆ドロップと手動並び替え
+const draggedIndex = ref<number | null>(null);
+
+function onDragStart(event: DragEvent, index: number) {
+  draggedIndex.value = index;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+  }
+}
+
+function onDrop(index: number) {
+  if (draggedIndex.value !== null && draggedIndex.value !== index) {
+    swapTaskSources(draggedIndex.value, index);
+  }
+  draggedIndex.value = null;
+}
+
+function swapTaskSources(indexA: number, indexB: number) {
+  if (indexA < 0 || indexA >= tasks.value.length || indexB < 0 || indexB >= tasks.value.length) return;
+  
+  const taskA = tasks.value[indexA];
+  const taskB = tasks.value[indexB];
+  
+  // ソースファイル情報（変更前）を入れ替える
+  const tempPath = taskA.old_path;
+  const tempName = taskA.old_name;
+  
+  taskA.old_path = taskB.old_path;
+  taskA.old_name = taskB.old_name;
+  
+  taskB.old_path = tempPath;
+  taskB.old_name = tempName;
+  
+  // 新しいパスを再計算
+  taskA.new_path = updateParentDir(taskA.old_path, taskA.new_name);
+  taskB.new_path = updateParentDir(taskB.old_path, taskB.new_name);
+}
+
+function updateParentDir(oldPath: string, newName: string): string {
+  const lastSlash = Math.max(oldPath.lastIndexOf('/'), oldPath.lastIndexOf('\\'));
+  if (lastSlash === -1) return newName;
+  return oldPath.substring(0, lastSlash + 1) + newName;
+}
+
+function moveTaskUp(index: number) {
+  if (index <= 0) return;
+  swapTaskSources(index, index - 1);
+}
+
+function moveTaskDown(index: number) {
+  if (index >= tasks.value.length - 1) return;
+  swapTaskSources(index, index + 1);
+}
+
+// 個別ファイル名手動編集
+function startEdit(index: number) {
+  tasks.value[index].isEditing = true;
+}
+
+function saveEdit(index: number) {
+  const task = tasks.value[index];
+  task.isEditing = false;
+  task.new_name = sanitizeFilename(task.new_name);
+  task.new_path = updateParentDir(task.old_path, task.new_name);
+}
+
+function sanitizeFilename(name: string): string {
+  return name.replace(/[\\/:*?"<>|]/g, "_");
+}
 
 let searchTimeout: any;
 watch(searchQuery, (newVal) => {
@@ -273,33 +347,123 @@ watch(searchQuery, (newVal) => {
             </div>
           </div>
 
-          <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden transition-all hover:shadow-md">
-            <table class="table w-full border-collapse">
-              <thead>
-                <tr class="bg-slate-50 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 border-b border-slate-100">
-                  <th class="w-16 text-center">選択</th>
-                  <th class="w-1/2 py-4 px-6">現在のファイル名</th>
-                  <th class="w-12 text-center"></th>
-                  <th class="w-1/2 py-4 px-6">リネーム後のファイル名</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-slate-100">
-                <tr v-for="task in tasks" :key="task.old_path" class="hover:bg-blue-50/30 transition-colors group">
-                  <td class="text-center">
-                    <input type="checkbox" v-model="task.selected" class="checkbox checkbox-primary checkbox-sm border-slate-300" />
-                  </td>
-                  <td class="py-4 px-6">
-                    <div class="text-xs font-mono opacity-50 truncate group-hover:opacity-100 transition-opacity" :title="task.old_name">{{ task.old_name }}</div>
-                  </td>
-                  <td class="text-center opacity-20 group-hover:opacity-100 transition-all group-hover:scale-125">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7" /></svg>
-                  </td>
-                  <td class="py-4 px-6">
-                    <div class="text-sm font-bold text-blue-600 tracking-tight truncate" :class="{ 'opacity-30 grayscale': !task.selected }" :title="task.new_name">{{ task.new_name }}</div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div class="space-y-3">
+            <div
+              v-for="(task, index) in tasks"
+              :key="task.old_path"
+              class="flex items-center gap-4 p-5 bg-white rounded-2xl border border-slate-200 hover:border-blue-300 hover:shadow-md hover:shadow-blue-500/5 transition-all group cursor-grab active:cursor-grabbing"
+              :class="{
+                'opacity-50 bg-slate-50/50 border-slate-100': !task.selected,
+                'border-blue-400 bg-blue-50/10 shadow-sm': draggedIndex === index
+              }"
+              draggable="true"
+              @dragstart="onDragStart($event, index)"
+              @dragover.prevent
+              @drop="onDrop(index)"
+            >
+              <!-- 並び替えハンドル & 上下ボタン -->
+              <div class="shrink-0 flex flex-col items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button
+                  @click.stop="moveTaskUp(index)"
+                  :disabled="index === 0"
+                  class="btn btn-xs btn-ghost btn-square w-5 h-5 min-h-0 text-[10px] text-slate-400 hover:text-blue-600 disabled:opacity-20"
+                  title="上に移動"
+                >
+                  ▲
+                </button>
+                <div class="text-[9px] font-bold text-slate-300 pointer-events-none">☰</div>
+                <button
+                  @click.stop="moveTaskDown(index)"
+                  :disabled="index === tasks.length - 1"
+                  class="btn btn-xs btn-ghost btn-square w-5 h-5 min-h-0 text-[10px] text-slate-400 hover:text-blue-600 disabled:opacity-20"
+                  title="下に移動"
+                >
+                  ▼
+                </button>
+              </div>
+
+              <!-- 選択チェックボックス -->
+              <div class="shrink-0 flex items-center justify-center w-8">
+                <input
+                  type="checkbox"
+                  v-model="task.selected"
+                  class="checkbox checkbox-primary checkbox-md border-slate-300 rounded-lg active:scale-90 transition-transform"
+                />
+              </div>
+
+              <!-- ファイル名表示エリア (2カラムグリッド) -->
+              <div class="flex-1 min-w-0 grid grid-cols-1 lg:grid-cols-2 gap-4 items-center">
+                <!-- 変更前 -->
+                <div class="min-w-0">
+                  <div class="flex items-center gap-1.5 mb-1.5 opacity-60">
+                    <span class="text-[9px] font-black uppercase tracking-widest text-slate-500">変更前</span>
+                  </div>
+                  <div
+                    class="text-xs font-mono text-slate-500 truncate group-hover:text-slate-800 transition-colors"
+                    :title="task.old_name"
+                  >
+                    {{ task.old_name }}
+                  </div>
+                </div>
+
+                <!-- 変更後 -->
+                <div class="min-w-0 lg:border-l lg:border-slate-100 lg:pl-6 flex flex-col justify-center">
+                  <div class="flex items-center justify-between gap-2 mb-1.5">
+                    <div class="flex items-center gap-2">
+                      <span class="text-[9px] font-black uppercase tracking-widest text-blue-600">変更後</span>
+                      <span
+                        v-if="task.old_name !== task.new_name"
+                        class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-100 text-[9px] font-black uppercase"
+                      >
+                        変更あり
+                      </span>
+                      <span
+                        v-else
+                        class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-400 text-[9px] font-black uppercase"
+                      >
+                        変更なし
+                      </span>
+                    </div>
+
+                    <!-- 編集アクションボタン -->
+                    <button
+                      v-if="!task.isEditing && task.selected"
+                      @click.stop="startEdit(index)"
+                      class="btn btn-xs btn-ghost btn-circle opacity-0 group-hover:opacity-100 transition-opacity hover:bg-slate-100 text-slate-400 hover:text-blue-600 w-6 h-6 min-h-0"
+                      title="ファイル名を手動で編集"
+                    >
+                      ✏️
+                    </button>
+                  </div>
+                  
+                  <div v-if="task.isEditing" class="flex items-center gap-2" @click.stop>
+                    <input
+                      type="text"
+                      v-model="task.new_name"
+                      @keyup.enter="saveEdit(index)"
+                      @blur="saveEdit(index)"
+                      class="input input-xs input-bordered w-full font-bold text-sm text-blue-600 bg-white"
+                      autofocus
+                    />
+                    <button @click.stop="saveEdit(index)" class="btn btn-xs btn-primary bg-blue-600 hover:bg-blue-700 border-none text-white font-bold px-3">保存</button>
+                  </div>
+                  <div
+                    v-else
+                    class="text-sm font-bold truncate transition-colors"
+                    :class="[
+                      task.selected
+                        ? task.old_name !== task.new_name
+                          ? 'text-blue-600'
+                          : 'text-slate-700'
+                        : 'text-slate-400'
+                    ]"
+                    :title="task.new_name"
+                  >
+                    {{ task.new_name }}
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 

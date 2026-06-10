@@ -11,6 +11,7 @@ const BASE_URL: &str = "https://api.annict.com/v1";
 pub struct AnnictWork {
     id: i32,
     title: String,
+    media: Option<String>,
     media_text: Option<String>,
     season_name_text: Option<String>,
 }
@@ -104,7 +105,12 @@ async fn get_episodes(work_id: i32) -> Result<Vec<AnnictEpisode>, String> {
 }
 
 #[tauri::command]
-fn get_rename_tasks(path: String, episodes: Vec<AnnictEpisode>) -> Result<Vec<RenameTask>, String> {
+fn get_rename_tasks(
+    path: String,
+    episodes: Vec<AnnictEpisode>,
+    work_title: String,
+    media: Option<String>,
+) -> Result<Vec<RenameTask>, String> {
     let target_path = PathBuf::from(&path);
     if !target_path.exists() {
         return Err("Path does not exist".into());
@@ -140,9 +146,17 @@ fn get_rename_tasks(path: String, episodes: Vec<AnnictEpisode>) -> Result<Vec<Re
 
     let mut tasks = Vec::new();
     let ep_map = build_episode_index(&episodes);
+    let is_movie_or_ova = match media.as_deref() {
+        Some("movie") | Some("ova") | Some("映画") | Some("OVA") => true,
+        _ => false,
+    };
 
-    for file_path in files {
+    for (i, file_path) in files.iter().enumerate() {
         let filename = file_path.file_name().unwrap().to_str().unwrap();
+        let ext = file_path.extension().unwrap().to_str().unwrap();
+
+        // 1. Try to match standard episode
+        let mut matched_ep_name: Option<String> = None;
         if let Some(num) = extract_episode_number(filename, &ep_map) {
             if let Some(ep) = ep_map.get(&num) {
                 let title_part = if let Some(t) = &ep.title {
@@ -150,22 +164,158 @@ fn get_rename_tasks(path: String, episodes: Vec<AnnictEpisode>) -> Result<Vec<Re
                 } else {
                     "".to_string()
                 };
-                
-                let ext = file_path.extension().unwrap().to_str().unwrap();
-                let new_name = sanitize_filename(&format!("{:0>2}{}.{}", num, title_part, ext));
-                let new_path = file_path.with_file_name(&new_name);
+                matched_ep_name = Some(sanitize_filename(&format!("{:0>2}{}.{}", num, title_part, ext)));
+            }
+        }
 
-                tasks.push(RenameTask {
-                    old_path: file_path.to_str().unwrap().to_string(),
-                    new_path: new_path.to_str().unwrap().to_string(),
-                    old_name: filename.to_string(),
-                    new_name,
-                });
+        // 2. Fallback logic if standard match failed (or if there are no episodes)
+        let new_name = if let Some(name) = matched_ep_name {
+            name
+        } else {
+            // No episode matched, or episodes list was empty
+            if files.len() == 1 {
+                // Single file:
+                // If it's a Movie/OVA or episodes is empty, or there's exactly 1 episode in the work,
+                // name it work_title.ext (optionally with the single episode's title if present and meaningful)
+                let title_part = if episodes.len() == 1 {
+                    if let Some(t) = &episodes[0].title {
+                        if t.is_empty() || t == "本編" || t == &work_title {
+                            "".to_string()
+                        } else {
+                            format!(" - {}", t)
+                        }
+                    } else {
+                        "".to_string()
+                    }
+                } else {
+                    "".to_string()
+                };
+                sanitize_filename(&format!("{}{}.{}", work_title, title_part, ext))
+            } else {
+                // Multiple files, no episode map match (e.g. episodes is empty or matching failed):
+                // If the work is a Movie/OVA or episodes list is empty:
+                if is_movie_or_ova || episodes.is_empty() {
+                    let num = extract_raw_number(filename);
+                    if let Some(n) = num {
+                        sanitize_filename(&format!("{} - {:0>2}.{}", work_title, n, ext))
+                    } else {
+                        sanitize_filename(&format!("{} - {:0>2}.{}", work_title, i + 1, ext))
+                    }
+                } else {
+                    // Skip TV series files that don't match any episode to prevent wrong renaming
+                    continue;
+                }
+            }
+        };
+
+        let new_path = file_path.with_file_name(&new_name);
+        tasks.push(RenameTask {
+            old_path: file_path.to_str().unwrap().to_string(),
+            new_path: new_path.to_str().unwrap().to_string(),
+            old_name: filename.to_string(),
+            new_name,
+        });
+    }
+
+    Ok(tasks)
+}
+
+fn extract_candidates(filename: &str) -> Vec<String> {
+    let stem = match std::path::Path::new(filename).file_stem().and_then(|s| s.to_str()) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    let mut name = stem.to_string();
+
+    // 1. Preprocessing (CRC removal)
+    let crc_re = Regex::new(r"\[[0-9a-fA-F]{8}\]").unwrap();
+    name = crc_re.replace_all(&name, "").to_string();
+
+    // Noise removal
+    let noise = [
+        r"(?i)\d{3,4}x\d{3,4}", // 1920x1080
+        r"(?i)(?:\d{3,4}p?|(?:10|8)bit|x26[45]|h26[45]|hevc|av1|avc|bdrip|web-dl|webrip|tvrip|dvdrip|hdtv)",
+        r"\b(?:19|20)\d{2}\b", // Year
+        r"(?i)\d\.\d\s*(?:ch)?", // 5.1ch, 2.0ch
+        r"(?i)(?:aac|flac|mp3|dts)(?:\d\.\d)?", // Audio codecs
+    ];
+    for p in noise {
+        let re = Regex::new(p).unwrap();
+        name = re.replace_all(&name, " ").to_string();
+    }
+
+    let mut candidates = Vec::new();
+
+    // 2. High priority tags (matching episode numbers)
+    let tags = [
+        r"(?i)s\d+e(\d{1,3})(?:v\d+)?",         // S01E03
+        r"(?i)e\s*(\d{1,3})(?:v\d+)?",           // E03, E 03
+        r"(?i)ep(?:isode)?\.?\s*(\d{1,3})(?:v\d+)?", // ep03, episode 3
+        r"第\s*(\d{1,3})(?:v\d+)?\s*[話话]",       // 第03話
+        r"#\s*(\d{1,3})(?:v\d+)?",               // #03
+    ];
+    for p in tags {
+        let re = Regex::new(p).unwrap();
+        if let Some(cap) = re.captures(&name) {
+            if let Some(m) = cap.get(1) {
+                if let Ok(parsed) = m.as_str().parse::<i32>() {
+                    candidates.push(parsed.to_string());
+                }
             }
         }
     }
 
-    Ok(tasks)
+    // 3. Remove season prefixes and versions to prevent them from matching as delimiters or potentials
+    let season_noise = [
+        r"(?i)\bs\d+\b",
+        r"(?i)\bseason\s*\d+\b",
+        r"(?i)\bver(?:sion)?\.?\s*\d+\b",
+    ];
+    let mut name_no_season = name.clone();
+    for p in season_noise {
+        let re = Regex::new(p).unwrap();
+        name_no_season = re.replace_all(&name_no_season, " ").to_string();
+    }
+
+    // 4. Delimiters
+    let delims = [
+        r"[\s\-\_\(\)\[\]](\d{1,3})(?:v\d+)?[\s\-\_\(\)\[\]]",
+        r"^\s*(\d{1,3})(?:v\d+)?[\s\-\_\(\)\[\]]",
+        r"[\s\-\_\(\)\[\]](\d{1,3})(?:v\d+)?\s*$",
+    ];
+    for p in delims {
+        let re = Regex::new(p).unwrap();
+        let matches: Vec<_> = re.captures_iter(&name_no_season).collect();
+        for cap in matches.iter().rev() {
+            if let Some(m) = cap.get(1) {
+                if let Ok(parsed) = m.as_str().parse::<i32>() {
+                    candidates.push(parsed.to_string());
+                }
+            }
+        }
+    }
+
+    // 5. Last resort
+    let pot_re = Regex::new(r"(\d{1,3})(?:v\d+)?").unwrap();
+    let potentials: Vec<_> = pot_re.captures_iter(&name_no_season).collect();
+    for cap in potentials.iter().rev() {
+        if let Some(m) = cap.get(1) {
+            if let Ok(parsed) = m.as_str().parse::<i32>() {
+                candidates.push(parsed.to_string());
+            }
+        }
+    }
+
+    // Remove duplicates while keeping order
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|x| seen.insert(x.clone()));
+
+    candidates
+}
+
+fn extract_raw_number(filename: &str) -> Option<String> {
+    extract_candidates(filename).into_iter().next()
 }
 
 #[tauri::command]
@@ -205,67 +355,11 @@ fn build_episode_index(episodes: &[AnnictEpisode]) -> std::collections::HashMap<
 }
 
 fn extract_episode_number(filename: &str, ep_map: &std::collections::HashMap<String, AnnictEpisode>) -> Option<String> {
-    let stem = std::path::Path::new(filename).file_stem()?.to_str()?;
-    let mut name = stem.to_string();
-
-    // 1. Preprocessing (CRC removal)
-    let crc_re = Regex::new(r"\[[0-9a-fA-F]{8}\]").unwrap();
-    name = crc_re.replace_all(&name, "").to_string();
-
-    // Noise removal
-    let noise = [
-        r"(?i)(?:\d{3,4}p?|(?:10|8)bit|x26[45]|h26[45]|hevc|av1|bdrip|web-dl|tvrip)",
-        r"(?:20[0-2][0-9]|19[8-9][0-9])",
-    ];
-    for p in noise {
-        let re = Regex::new(p).unwrap();
-        name = re.replace_all(&name, " ").to_string();
-    }
-
-    // 2. Pattern matching
-    // High priority tags
-    let tags = [
-        r"(?i)ep(?:isode)?\.?\s*(\d{1,3})(?:v\d+)?",
-        r"第\s*(\d{1,3})(?:v\d+)?\s*[話话]",
-        r"#\s*(\d{1,3})(?:v\d+)?",
-    ];
-    for p in tags {
-        let re = Regex::new(p).unwrap();
-        if let Some(cap) = re.captures(&name) {
-            let num = cap.get(1).unwrap().as_str().parse::<i32>().unwrap_or(-1).to_string();
-            if ep_map.contains_key(&num) {
-                return Some(num);
-            }
-        }
-    }
-
-    // Delimiters
-    let delims = [
-        r"[\s\-\_\(\)\[\]](\d{1,3})(?:v\d+)?[\s\-\_\(\)\[\]]",
-        r"^\s*(\d{1,3})(?:v\d+)?[\s\-\_\(\)\[\]]",
-        r"[\s\-\_\(\)\[\]](\d{1,3})(?:v\d+)?\s*$",
-    ];
-    for p in delims {
-        let re = Regex::new(p).unwrap();
-        let matches: Vec<_> = re.captures_iter(&name).collect();
-        for cap in matches.iter().rev() {
-            let num = cap.get(1).unwrap().as_str().parse::<i32>().unwrap_or(-1).to_string();
-            if ep_map.contains_key(&num) {
-                return Some(num);
-            }
-        }
-    }
-
-    // Last resort
-    let pot_re = Regex::new(r"(\d{1,3})(?:v\d+)?").unwrap();
-    let potentials: Vec<_> = pot_re.captures_iter(&name).collect();
-    for cap in potentials.iter().rev() {
-        let num = cap.get(1).unwrap().as_str().parse::<i32>().unwrap_or(-1).to_string();
+    for num in extract_candidates(filename) {
         if ep_map.contains_key(&num) {
             return Some(num);
         }
     }
-
     None
 }
 
@@ -288,4 +382,39 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_raw_number() {
+        let cases = vec![
+            ("[SubsPlease] Anime Title - 01 (1080p) [DEB8ADBA].mkv", Some("1")),
+            ("[Erai-raws] Anime Title - 02 [1080p] [Multiple Subtitle].mkv", Some("2")),
+            ("Anime Title - S01E03 - Episode Title.mkv", Some("3")),
+            ("Anime Title Season 1 - 04.mkv", Some("4")),
+            ("Anime.Title.E05.1080p.mkv", Some("5")),
+            ("Anime Title #06.mkv", Some("6")),
+            ("[Group] Anime Title (2024) - 07.mkv", Some("7")),
+            ("Anime Title - 08v2.mkv", Some("8")),
+            ("Anime Title - 09 (5.1ch).mkv", Some("9")),
+            ("Anime Title - 10 (1920x1080).mkv", Some("10")),
+            ("Anime Title - 第11話.mkv", Some("11")),
+            ("Anime Title - ep12.mkv", Some("12")),
+            ("Anime Title - S02 - 13.mkv", Some("13")),
+            ("Anime Title S02E14 [1920x1080 FLAC 5.1ch].mkv", Some("14")),
+        ];
+
+        for (filename, expected) in cases {
+            let result = extract_raw_number(filename);
+            assert_eq!(
+                result.as_deref(),
+                expected,
+                "Failed for filename: {}",
+                filename
+            );
+        }
+    }
 }
