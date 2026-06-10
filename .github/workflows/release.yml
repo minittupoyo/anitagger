@@ -6,6 +6,11 @@ on:
       - main
     tags:
       - 'v*'
+    paths-ignore:
+      - 'README.md'
+      - 'GEMINI.md'
+      - '.gitignore'
+      - '.vscode/**'
   workflow_dispatch:
 
 jobs:
